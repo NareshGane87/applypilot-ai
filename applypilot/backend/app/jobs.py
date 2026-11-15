@@ -46,38 +46,46 @@ async def sync_public_boards(db: Session, query: str = "") -> int:
 async def sync_jsearch(db: Session, query: str = "", location: str = "India") -> int:
     """Imports live listings from the licensed JSearch API (RapidAPI), which aggregates LinkedIn, Naukri, Indeed and other boards.
     The key stays in server-side env (RAPIDAPI_KEY). No scraping is done by this app."""
+    import hashlib
     if not settings.rapidapi_key:
         return 0
     search = f"{query.strip() or 'software developer'} in {location}"
     try:
-        async with httpx.AsyncClient(timeout=25) as client:
+        async with httpx.AsyncClient(timeout=40) as client:
             r = await client.get(
                 "https://jsearch.p.rapidapi.com/search",
-                params={"query": search, "page": "1", "num_pages": "1", "country": "in", "date_posted": "month"},
+                params={"query": search, "num_pages": "1", "country": "in", "date_posted": "month"},
                 headers={"X-RapidAPI-Key": settings.rapidapi_key, "X-RapidAPI-Host": "jsearch.p.rapidapi.com"},
             )
         if r.status_code != 200:
             return 0
-        rows = r.json().get("data") or []
+        payload = r.json().get("data") or []
     except (httpx.HTTPError, ValueError):
         return 0
+    # v5 returns {"data": {"jobs": [...], "cursor": ...}}; older versions return a plain list.
+    rows = payload.get("jobs", []) if isinstance(payload, dict) else payload
     added = 0
     for x in rows:
-        ext = str(x.get("job_id") or "")
-        url = x.get("job_apply_link") or x.get("job_google_link") or ""
-        if not ext or not url:
+        if not isinstance(x, dict):
             continue
+        raw_id = str(x.get("job_id") or "")
+        options = x.get("apply_options") or [{}]
+        url = x.get("job_apply_link") or (options[0] or {}).get("apply_link") or x.get("job_google_link") or ""
+        if not raw_id or not url:
+            continue
+        # JSearch ids can exceed 255 chars; store a stable hash instead.
+        ext = raw_id if len(raw_id) <= 200 else hashlib.sha256(raw_id.encode()).hexdigest()
         publisher = (x.get("job_publisher") or "web").strip()
         source = ("jsearch:" + publisher.lower())[:40]
         if db.query(Job).filter_by(source=source, external_id=ext).first():
             continue
-        loc = ", ".join(p for p in [x.get("job_city"), x.get("job_state"), x.get("job_country")] if p) or "Not specified"
+        loc = x.get("job_location") or ", ".join(p for p in [x.get("job_city"), x.get("job_state"), x.get("job_country")] if p) or "Not specified"
         db.add(Job(
             external_id=ext, source=source, title=(x.get("job_title") or "")[:255],
-            company=(x.get("employer_name") or "Unknown")[:255], location=loc[:255],
+            company=(x.get("employer_name") or "Unknown")[:255], location=str(loc)[:255],
             description=(x.get("job_description") or "")[:15000], url=url,
             remote=bool(x.get("job_is_remote")), employment_type=(x.get("job_employment_type") or "Not specified")[:80],
-            posted_at=(x.get("job_posted_at_datetime_utc") or "")[:80],
+            posted_at=str(x.get("job_posted_at_datetime_utc") or x.get("job_posted_at") or "")[:80],
         ))
         added += 1
     db.commit()
