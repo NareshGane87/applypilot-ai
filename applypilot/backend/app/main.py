@@ -12,7 +12,7 @@ from .models import User, Profile, Job, Application
 from .schemas import AuthIn, TokenOut, ProfileIn, ApplicationStatusIn, GenerateIn
 from .security import hash_password, verify_password, create_token, current_user
 from .ai import extract_profile, tailor_application
-from .jobs import sync_public_boards, score_job
+from .jobs import sync_public_boards, sync_jsearch, score_job
 
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title=settings.app_name, version="0.1.0", description="AI-assisted global job discovery and application workspace")
@@ -79,7 +79,8 @@ async def upload_resume(file: UploadFile = File(...), user: User = Depends(curre
 @app.post("/api/jobs/sync")
 async def sync_jobs(q: str = Query(default="", max_length=100), user: User = Depends(current_user), db: Session = Depends(get_db)):
     count = await sync_public_boards(db, q)
-    return {"added":count,"message":"Synced available public employer-board listings. Configure more employer board slugs for broader coverage."}
+    live = await sync_jsearch(db, q)
+    return {"added":count+live,"live_added":live,"message":"Synced public employer boards and live listings from the licensed job-data provider (LinkedIn, Naukri, Indeed and others via JSearch)."}
 
 @app.get("/api/jobs")
 def list_jobs(q: str = "", limit: int = 50, user: User = Depends(current_user), db: Session = Depends(get_db)):
