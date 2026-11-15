@@ -2,6 +2,9 @@ import httpx
 from sqlalchemy.orm import Session
 from .models import Job
 from .config import settings
+import logging
+
+log = logging.getLogger("uvicorn.error")
 
 async def sync_public_boards(db: Session, query: str = "") -> int:
     """Imports public Greenhouse and Lever job-board listings. Uses board/company slugs, not private account APIs."""
@@ -47,7 +50,9 @@ async def sync_jsearch(db: Session, query: str = "", location: str = "India") ->
     """Imports live listings from the licensed JSearch API (RapidAPI), which aggregates LinkedIn, Naukri, Indeed and other boards.
     The key stays in server-side env (RAPIDAPI_KEY). No scraping is done by this app."""
     import hashlib
-    if not settings.rapidapi_key:
+    api_key = (settings.rapidapi_key or "").strip()
+    if not api_key:
+        log.warning("jsearch: RAPIDAPI_KEY is not set; skipping live jobs")
         return 0
     search = f"{query.strip() or 'software developer'} in {location}"
     try:
@@ -55,15 +60,18 @@ async def sync_jsearch(db: Session, query: str = "", location: str = "India") ->
             r = await client.get(
                 "https://jsearch.p.rapidapi.com/search",
                 params={"query": search, "num_pages": "1", "country": "in", "date_posted": "month"},
-                headers={"X-RapidAPI-Key": settings.rapidapi_key, "X-RapidAPI-Host": "jsearch.p.rapidapi.com"},
+                headers={"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": "jsearch.p.rapidapi.com"},
             )
         if r.status_code != 200:
+            log.warning("jsearch: HTTP %s %s", r.status_code, r.text[:200])
             return 0
         payload = r.json().get("data") or []
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("jsearch: request failed: %r", exc)
         return 0
     # v5 returns {"data": {"jobs": [...], "cursor": ...}}; older versions return a plain list.
     rows = payload.get("jobs", []) if isinstance(payload, dict) else payload
+    log.info("jsearch: %s rows returned for %r", len(rows), search)
     added = 0
     for x in rows:
         if not isinstance(x, dict):
